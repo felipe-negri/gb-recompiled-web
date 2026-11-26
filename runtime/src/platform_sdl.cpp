@@ -3186,6 +3186,10 @@ bool gb_platform_init(int scale) {
         return false;
     }
     load_runtime_preferences();
+#ifdef __EMSCRIPTEN__
+    /* Na web a página escala o canvas (shell.html): o jogo ocupa o canvas inteiro. */
+    g_render_scaling_mode = GB_RENDER_SCALING_STRETCH;
+#endif
     fprintf(stderr, "[SDL] SDL initialized.\n");
 
 #if defined(__ANDROID__)

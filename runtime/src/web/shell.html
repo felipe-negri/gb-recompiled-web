@@ -7,13 +7,29 @@
 <style>
   html, body { margin: 0; height: 100%; background: #111; color: #ccc; font: 14px system-ui, sans-serif; }
   body { display: flex; align-items: center; justify-content: center; }
-  canvas { max-width: 100vw; max-height: 100vh; image-rendering: pixelated; outline: none; }
+  canvas { outline: none; image-rendering: pixelated; }
+  body.smooth canvas { image-rendering: auto; }
   #status { position: fixed; bottom: 8px; left: 0; right: 0; text-align: center; }
+  #view { position: fixed; right: 12px; bottom: 12px; display: flex; gap: 6px; padding: 6px; border-radius: 8px;
+          background: rgba(20,20,20,.85); transition: opacity .3s; }
+  body.idle #view:not(:focus-within) { opacity: 0; pointer-events: none; }
+  #view select { background: #222; color: #ddd; border: 1px solid #444; border-radius: 6px; padding: 4px 6px; font: inherit; }
 </style>
 </head>
 <body>
 <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
 <div id="status">Carregando…</div>
+<div id="view">
+  <select id="scale" aria-label="Escala">
+    <option value="fit">Ajustar à tela</option>
+    <option value="int">Inteira (pixel perfeito)</option>
+    <option value="stretch">Esticar</option>
+  </select>
+  <select id="filter" aria-label="Filtro">
+    <option value="sharp">Pixelado</option>
+    <option value="smooth">Suave</option>
+  </select>
+</div>
 <script>
   var statusEl = document.getElementById('status');
   var Module = {
@@ -24,6 +40,34 @@
     onRuntimeInitialized: function () { Module.canvas.focus(); },
   };
   window.addEventListener('error', function () { Module.setStatus('Erro, veja o console.'); });
+
+  // Escala da tela, feita no CSS: o SDL desenha o Game Boy em 5x (800x720), em blocos iguais por pixel do jogo,
+  // então "inteira" (múltiplo de 160x144) fica pixel perfeito mesmo com a amostragem nearest do navegador.
+  (function () {
+    var canvas = document.getElementById('canvas'), scale = document.getElementById('scale'), filter = document.getElementById('filter');
+    var rule = document.head.appendChild(document.createElement('style'));
+    function get(k, d) { try { return localStorage.getItem('gbweb-' + k) || d; } catch (e) { return d; } }
+    function set(k, v) { try { localStorage.setItem('gbweb-' + k, v); } catch (e) {} }
+    scale.value = get('scale', 'fit');
+    filter.value = get('filter', 'sharp');
+    function apply() {
+      var W = innerWidth, H = innerHeight, w, h;
+      if (scale.value === 'stretch') { w = W; h = H; }
+      else if (scale.value === 'int') { var k = Math.max(1, Math.floor(Math.min(W / 160, H / 144))); w = 160 * k; h = 144 * k; }
+      else { var f = Math.min(W / 160, H / 144); w = Math.floor(160 * f); h = Math.floor(144 * f); }
+      // !important: o SDL reescreve o style do canvas quando a janela muda de tamanho
+      rule.textContent = '#canvas{width:' + w + 'px!important;height:' + h + 'px!important}';
+      document.body.classList.toggle('smooth', filter.value === 'smooth');
+    }
+    scale.onchange = function () { set('scale', scale.value); apply(); canvas.focus(); };
+    filter.onchange = function () { set('filter', filter.value); apply(); canvas.focus(); };
+    addEventListener('resize', apply);
+    apply();
+    var t;
+    function wake() { document.body.classList.remove('idle'); clearTimeout(t); t = setTimeout(function () { document.body.classList.add('idle'); }, 2500); }
+    addEventListener('mousemove', wake); addEventListener('touchstart', wake);
+    wake();
+  })();
 </script>
 {{{ SCRIPT }}}
 </body>
