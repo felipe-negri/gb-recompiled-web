@@ -30,6 +30,9 @@
 #include <thread>
 #endif
 #include <vector>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 #include "imgui.h"
 #include "backends/imgui_impl_sdl2.h"
 #include "backends/imgui_impl_sdlrenderer2.h"
@@ -3173,6 +3176,11 @@ bool gb_platform_init(int scale) {
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0");
 #endif
+#ifdef __EMSCRIPTEN__
+    /* SDL would emscripten_sleep() inside SwapWindow, reached through indirect calls that
+     * -sASYNCIFY_IGNORE_INDIRECT does not instrument; gb_platform_vsync yields instead. */
+    SDL_SetHint(SDL_HINT_EMSCRIPTEN_ASYNCIFY, "0");
+#endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) {
         fprintf(stderr, "[SDL] SDL_Init failed: %s\n", SDL_GetError());
         return false;
@@ -3628,10 +3636,34 @@ uint8_t gb_platform_get_joypad(void) {
     return g_joypad_buttons & g_joypad_dpad;
 }
 
+#ifdef __EMSCRIPTEN__
+/* Desktop saves cartridge RAM on exit; a browser tab just closes, so persist changes as they
+ * happen. Checked about once a second, written only when the RAM differs from the last save. */
+static void web_autosave_battery_ram(void) {
+    static std::vector<uint8_t> last_saved;
+    static unsigned frames = 0;
+    GBContext* ctx = g_registered_ctx;
+    if (++frames < 60 || !ctx || !ctx->eram || !ctx->eram_size || ctx->persistence_load_failed) return;
+    frames = 0;
+    if (last_saved.size() != ctx->eram_size) {
+        last_saved.assign(ctx->eram, ctx->eram + ctx->eram_size); /* baseline = loaded/initial RAM */
+        return;
+    }
+    if (memcmp(last_saved.data(), ctx->eram, ctx->eram_size) == 0) return;
+    if (gb_context_save_ram(ctx)) last_saved.assign(ctx->eram, ctx->eram + ctx->eram_size);
+}
+#endif
+
 void gb_platform_vsync(uint32_t frame_cycles) {
+#ifdef __EMSCRIPTEN__
+    web_autosave_battery_ram();
+#endif
     if (g_benchmark_mode || g_app_suspended) {
         g_last_timing.pacing_cycles = (frame_cycles > 0) ? frame_cycles : 70224u;
         g_last_timing.pacing_ms = 0.0;
+#ifdef __EMSCRIPTEN__
+        emscripten_sleep(g_app_suspended ? 16 : 0); /* never starve the browser event loop */
+#endif
         return;
     }
     /* 
@@ -3669,6 +3701,13 @@ void gb_platform_vsync(uint32_t frame_cycles) {
     uint32_t audio_fill = audio_ring_fill_samples();
     bool audio_starved = audio_output_should_run() && g_audio_started && audio_fill < g_audio_low_watermark;
 
+#ifdef __EMSCRIPTEN__
+    /* Browser: no busy-wait; yield once per paced frame (Asyncify resumes the game loop). */
+    emscripten_sleep((!audio_starved && now < target_frame_time)
+                         ? (unsigned)(((target_frame_time - now) * 1000) / freq)
+                         : 0);
+    now = SDL_GetPerformanceCounter();
+#else
     if (!audio_starved && now < target_frame_time) {
         for (;;) {
             uint64_t wait_ticks = target_frame_time - now;
@@ -3697,6 +3736,7 @@ void gb_platform_vsync(uint32_t frame_cycles) {
         }
         now = SDL_GetPerformanceCounter();
     }
+#endif
 
     /* If we fell behind by more than 3 frames, reset (don't try to catch up) */
     uint64_t max_frame_lag = frame_ticks * 3;
@@ -3746,6 +3786,8 @@ static void sdl_get_persistent_path(char* buffer, size_t size, const char* rom_n
 #if defined(__ANDROID__)
     const std::string resolved = resolve_writable_path(filename.c_str(), base_name.c_str());
     snprintf(buffer, size, "%s", resolved.c_str());
+#elif defined(__EMSCRIPTEN__)
+    snprintf(buffer, size, "/saves/%s", filename.c_str()); /* IndexedDB mount from web/pre.js */
 #else
     char* base_path = SDL_GetBasePath();
     if (base_path) {
@@ -3913,6 +3955,10 @@ static bool sync_persistence_file(FILE* file) {
     }
 #if defined(_WIN32)
     return _commit(_fileno(file)) == 0;
+#elif defined(__EMSCRIPTEN__)
+    /* Under Asyncify fsync() suspends for an IndexedDB sync, which cannot unwind through the
+     * save callback; pre.js syncs the mount after the commit instead. */
+    return true;
 #else
     return fsync(fileno(file)) == 0;
 #endif
@@ -3930,6 +3976,9 @@ static bool replace_persistence_file(
     if (rename(staged.string().c_str(), destination.string().c_str()) != 0) {
         return false;
     }
+#ifdef __EMSCRIPTEN__
+    return true; /* see sync_persistence_file */
+#endif
     const fs::path parent = destination.parent_path();
     const int directory_fd = open(parent.string().c_str(), O_RDONLY);
     if (directory_fd >= 0) {
@@ -4031,6 +4080,10 @@ static bool write_persistence_transaction(
             strerror(replace_error));
         return false;
     }
+#ifdef __EMSCRIPTEN__
+    /* Persist MEMFS writes to IndexedDB (mounted by web/pre.js). */
+    EM_ASM(if (Module.gbrtSyncSaves) Module.gbrtSyncSaves(););
+#endif
     return true;
 }
 
